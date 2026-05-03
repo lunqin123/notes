@@ -1,0 +1,25 @@
+{
+  "language": "en",
+  "lineLayout": "expanded",
+  "showSeparators": false,
+  "display": {
+    "showTools": false,
+    "showAgents": false,
+    "showTodos": false,
+    "showProject": true,
+    "showConfigCounts": true,
+    "showTokenBreakdown": true,
+    "showSpeed": true,
+    "showUsage": true,
+    "showDuration": true,
+    "showSessionName": true,
+    "showSessionTokens": true,
+    "showCost": true
+  },
+  "gitStatus": {
+    "enabled": true,
+    "showDirty": true,
+    "showAheadBehind": false,
+    "showFileStats": false
+  }
+}
