@@ -5,9 +5,9 @@ import { label, getContextColor, RESET } from '../colors.js';
 /**
  * Calculate the prompt cache hit rate from session token usage.
  *
- * Cache hit rate = cache_read_tokens / (input_tokens + cache_creation_tokens + cache_read_tokens)
- * This measures what percentage of the prompt (input) was served from cache.
- * Output tokens are excluded since they are never cached.
+ * Cache hit rate = cache_read_tokens / input_tokens
+ * API 的 input_tokens 已包含 cache_creation_input_tokens 和 cache_read_input_tokens，
+ * 所以直接使用 input_tokens 作为分母即可得到正确的缓存命中率。
  */
 function calcCacheHitRate(ctx: RenderContext): number | null {
   const tokens = ctx.transcript.sessionTokens;
@@ -15,13 +15,12 @@ function calcCacheHitRate(ctx: RenderContext): number | null {
     return null;
   }
 
-  const denominator = tokens.inputTokens + tokens.cacheCreationTokens + tokens.cacheReadTokens;
-  if (denominator === 0) {
+  if (tokens.inputTokens === 0) {
     return null;
   }
 
   // Keep 3 decimal places for precision
-  return Math.round((tokens.cacheReadTokens / denominator) * 100_000) / 1000;
+  return Math.round((tokens.cacheReadTokens / tokens.inputTokens) * 100_000) / 1000;
 }
 
 export function renderCacheHitRateLine(

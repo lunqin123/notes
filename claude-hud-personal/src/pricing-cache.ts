@@ -12,7 +12,7 @@ const FETCH_LOCK_FILENAME = '.pricing-fetching';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;   // 24h 缓存有效期
 const FETCH_LOCK_TTL_MS = 5 * 60 * 1000;     // 5min 锁避免并发
 const CHANGE_NOTIFY_TTL_MS = 60 * 60 * 1000; // 价格变化通知保留 1 小时
-const CNY_PER_USD = 7.2;
+const CNY_PER_USD = 6.75;
 
 export interface CachedModelPricing {
   inputCnyPerMillion: number;
@@ -137,35 +137,121 @@ export function fetchLatestPricing(): Promise<CachedPricing | null> {
 /**
  * 解析 DeepSeek 定价页面的 HTML，提取模型定价。
  *
- * 页面中包含定价表格，格式如下:
- * | deepseek-v4-flash | 1元 | 2元 | 0.02元 |
- * | deepseek-v4-pro   | 3元 | 6元 | 0.025元 |
+ * 使用多策略应对页面格式变化：
+ * 1. Markdown 表格行（如 | deepseek-v4-flash | 1元 | 2元 | 0.02元 |）
+ * 2. HTML 表格行（<tr><td>deepseek-v4-flash</td><td>1</td><td>2</td><td>0.02</td></tr>）
+ * 3. 宽松模式：查找任何 "deepseek-v4-xxx" + 三个价格的模式
+ *
+ * 列顺序不确定时按价格大小推断：缓存价 ≤ 输入价 ≤ 输出价
  */
 function parsePricingPage(html: string): CachedPricing | null {
+  const rows = extractPricingRows(html);
+  if (rows.length === 0) return null;
+
   const models: Record<string, CachedModelPricing> = {};
-  let foundAny = false;
 
-  // 查找定价表格行: 匹配 | 模型名 | 输入价 | 输出价 | 缓存价 | 这类模式
-  const rowPattern = /\|\s*(deepseek-v4-\w+)\s*\|\s*([\d.]+)\s*元[^|]*\|\s*([\d.]+)\s*元[^|]*\|\s*([\d.]+)\s*元/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = rowPattern.exec(html)) !== null) {
-    const [, modelName, inputPrice, outputPrice, cacheHitPrice] = match;
+  for (const [modelName, ...priceStrs] of rows) {
+    const prices = priceStrs.map(p => parseFloat(p));
+    if (prices.length < 3 || prices.some(p => isNaN(p) || p < 0)) continue;
+    // 按大小排序推断列：缓存价 ≤ 输入价 ≤ 输出价
+    const sorted = [...prices].sort((a, b) => a - b);
     models[modelName] = {
-      inputCnyPerMillion: parseFloat(inputPrice),
-      outputCnyPerMillion: parseFloat(outputPrice),
-      cacheHitCnyPerMillion: parseFloat(cacheHitPrice),
+      cacheHitCnyPerMillion: sorted[0],
+      inputCnyPerMillion: sorted[1],
+      outputCnyPerMillion: sorted[2],
     };
-    foundAny = true;
   }
 
-  if (!foundAny) return null;
+  if (Object.keys(models).length === 0) return null;
 
   return {
     fetchedAt: Date.now(),
     source: 'web',
     models,
   };
+}
+
+/** 从 HTML 中提取所有定价数据行，返回 [modelName, price1, price2, price3][] */
+function extractPricingRows(html: string): string[][] {
+  // 策略1: Markdown 表格行
+  const mdRows = extractMdTableRows(html);
+  if (mdRows.length > 0) return mdRows;
+  // 策略2: HTML 表格行
+  const htmlRows = extractHtmlTableRows(html);
+  if (htmlRows.length > 0) return htmlRows;
+  // 策略3: 宽松正则匹配
+  return extractLooseRows(html);
+}
+
+/** 提取 Markdown 表格行，过滤表头/分隔行 */
+function extractMdTableRows(html: string): string[][] {
+  const rows: string[][] = [];
+  const linePattern = /^\s*\|.+\|\s*$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = linePattern.exec(html)) !== null) {
+    const cells = m[0]
+      .split('|')
+      .map(c => c.trim())
+      .filter(c => c.length > 0 && !/^[-:\s]+$/.test(c)); // 跳过分隔行
+    if (cells.length < 4) continue;
+    const model = extractDeepSeekModel(cells[0]);
+    if (!model) continue;
+    const prices = cells.slice(1).map(cleanPrice);
+    if (prices.filter(p => /^\d/.test(p)).length >= 3) {
+      rows.push([model, ...prices.slice(0, 3)]);
+    }
+  }
+  return rows;
+}
+
+/** 提取 HTML <table> 中的行 */
+function extractHtmlTableRows(html: string): string[][] {
+  const rows: string[][] = [];
+  const trPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trM: RegExpExecArray | null;
+  while ((trM = trPattern.exec(html)) !== null) {
+    const cells: string[] = [];
+    const tdPattern = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let tdM: RegExpExecArray | null;
+    while ((tdM = tdPattern.exec(trM[1])) !== null) {
+      cells.push(stripTags(tdM[1]).trim());
+    }
+    if (cells.length < 4) continue;
+    const model = extractDeepSeekModel(cells[0]);
+    if (!model) continue;
+    const prices = cells.slice(1).map(cleanPrice);
+    if (prices.filter(p => /^\d/.test(p)).length >= 3) {
+      rows.push([model, ...prices.slice(0, 3)]);
+    }
+  }
+  return rows;
+}
+
+/** 宽松模式：在全文搜索 "deepseek-v4-xxx" 附近的三组价格数字 */
+function extractLooseRows(html: string): string[][] {
+  const rows: string[][] = [];
+  const pattern = /\b(deepseek-v4-\w+)\b[\s\S]*?(\d+\.?\d*)\s*元[\s\S]*?(\d+\.?\d*)\s*元[\s\S]*?(\d+\.?\d*)\s*元/gi;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(html)) !== null) {
+    rows.push([m[1], m[2], m[3], m[4]]);
+  }
+  return rows;
+}
+
+/** 尝试从文本中提取 DeepSeek 模型名 */
+function extractDeepSeekModel(text: string): string | null {
+  const m = /\b(deepseek-v4-\w+)\b/i.exec(text);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/** 从价格字符串中提取数字部分 */
+function cleanPrice(s: string): string {
+  const m = /(\d+\.?\d*)/.exec(s.replace(/,/g, ''));
+  return m ? m[1] : s;
+}
+
+function stripTags(html: string): string {
+  return html.replace(/<[^>]*>/g, '');
 }
 
 /**

@@ -27,8 +27,9 @@ const TOKENS_PER_MILLION = 1_000_000;
 const CACHE_WRITE_MULTIPLIER = 1.25;
 const CACHE_READ_MULTIPLIER = 0.1;
 
-// Approximate USD to CNY exchange rate (~7.2 as of 2025)
-export const CNY_PER_USD = 7.2;
+// Approximate USD to CNY exchange rate (~6.75 as of 2026-05)
+// Updated periodically; consider fetching from an API for auto-updates
+export const CNY_PER_USD = 6.75;
 
 // Patterns are tried in order; the first match wins. Families with more specific
 // model lines (Haiku 4.x differs from Haiku 3.5) must come before any broader
@@ -129,7 +130,12 @@ export function estimateSessionCost(
   const cacheReadMul = pricing.cacheReadMultiplier ?? CACHE_READ_MULTIPLIER;
   const cacheWriteMul = pricing.cacheWriteMultiplier ?? CACHE_WRITE_MULTIPLIER;
 
-  const inputUsd = calculateUsd(sessionTokens.inputTokens, pricing.inputUsdPerMillion);
+  // API 的 input_tokens 已包含 cache_creation_input_tokens 和 cache_read_input_tokens，
+  // 减去缓存部分避免重复计费：inputTokens = 纯输入 + 缓存写入 + 缓存读取
+  const regularInputTokens = Math.max(0,
+    sessionTokens.inputTokens - sessionTokens.cacheCreationTokens - sessionTokens.cacheReadTokens,
+  );
+  const inputUsd = calculateUsd(regularInputTokens, pricing.inputUsdPerMillion);
   const cacheCreationUsd = calculateUsd(sessionTokens.cacheCreationTokens, pricing.inputUsdPerMillion * cacheWriteMul);
   const cacheReadUsd = calculateUsd(sessionTokens.cacheReadTokens, pricing.inputUsdPerMillion * cacheReadMul);
   const outputUsd = calculateUsd(sessionTokens.outputTokens, pricing.outputUsdPerMillion);
